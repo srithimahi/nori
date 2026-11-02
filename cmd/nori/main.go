@@ -1,6 +1,6 @@
 package main
 
-import(
+import (
 	"bufio"
 	"flag"
 	"fmt"
@@ -39,13 +39,13 @@ func main() {
 
 	case "receive":
 		receiveFiles(*address)
-	default: 
+	default:
 		fmt.Println("Usage:")
 		fmt.Println("  go run ./cmd/nori -mode=listen")
 		fmt.Println("  go run ./cmd/nori -mode=connect")
 		fmt.Println("  go run ./cmd/nori -mode=receive")
 		fmt.Println("  go run ./cmd/nori -mode=send -file=example.txt")
-	} 
+	}
 }
 
 func startServer(address string) {

@@ -1,6 +1,7 @@
 package transfer
 
-import(
+import (
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import(
 
 const MaxFileSize int64 = 10 << 30
 const MaxNameLength = 255
+const ChunkSize = 256 * 1024
 
 func SendFile(conn net.Conn, filePath string) error {
 	fmt.Printf("DEBUG: Opening file %q\n", filePath)
@@ -54,12 +56,52 @@ func SendFile(conn net.Conn, filePath string) error {
 
 	fmt.Printf("Sending %s (%d bytes)\n", name, info.Size())
 
-	sent, err := io.CopyN(conn, file, info.Size())
-	if err != nil {
-		return err
+	buffer := make([]byte, ChunkSize)
+	hasher := sha256.New()
+
+	var totalSent int64
+
+	for totalSent < info.Size() {
+		remaining := info.Size() - totalSent
+		nextSize := int64(ChunkSize)
+
+		if remaining < nextSize {
+			nextSize = remaining
+		}
+
+		n, err := io.ReadFull(file, buffer[:int(nextSize)])
+		if err != nil {
+			return fmt.Errorf("reading chunk: %w", err)
+		}
+
+		if _, err := hasher.Write(buffer[:n]); err != nil {
+			return err
+		}
+
+		written := 0
+		for written < n {
+			count, err := conn.Write(buffer[written:n])
+			if err != nil {
+				return fmt.Errorf("sending chunk: %w", err)
+			}
+
+			if count == 0 {
+				return io.ErrShortWrite
+			}
+
+			written += count
+		}
+
+		totalSent += int64(n)
+
+		fmt.Printf("\rSending: %.1f%%",
+			float64(totalSent)/float64(info.Size())*100)
 	}
 
-	fmt.Printf("Send %d bytes\n", sent)
+	fmt.Println()
+	fmt.Printf("SHA-256: %x\n", hasher.Sum(nil))
+	fmt.Printf("Sent %d bytes\n", totalSent)
+
 	return nil
 }
 
@@ -76,7 +118,7 @@ func ReceiveFile(conn net.Conn, downloadDir string) error {
 
 	nameBytes := make([]byte, nameLength)
 
-	if _,err := io.ReadFull(conn, nameBytes); err != nil {
+	if _, err := io.ReadFull(conn, nameBytes); err != nil {
 		return err
 	}
 
@@ -110,11 +152,50 @@ func ReceiveFile(conn net.Conn, downloadDir string) error {
 
 	fmt.Printf("Receiving %s (%d bytes)\n", name, fileSize)
 
-	received, err := io.CopyN(temp, conn, int64(fileSize))
-	if err != nil {
-		temp.Close()
-		return fmt.Errorf("incomplete transfer: %w", err)
+	buffer := make([]byte, ChunkSize)
+	hasher := sha256.New()
+
+	var totalReceived int64
+
+	for totalReceived < int64(fileSize) {
+		remaining := int64(fileSize) - totalReceived
+		nextSize := int64(ChunkSize)
+
+		if remaining < nextSize {
+			nextSize = remaining
+		}
+
+		n, err := io.ReadFull(conn, buffer[:int(nextSize)])
+		if err != nil {
+			temp.Close()
+			return fmt.Errorf("receiving chuck: %w", err)
+		}
+
+		written, err := temp.Write(buffer[:n])
+		if err != nil {
+			temp.Close()
+			return fmt.Errorf("writing chunk: %w", err)
+		}
+		if written != n {
+			temp.Close()
+			return io.ErrShortWrite
+		}
+
+		if _, err := hasher.Write(buffer[:n]); err != nil {
+			temp.Close()
+			return err
+		}
+
+		totalReceived += int64(n)
+
+		fmt.Printf("\rReceiving: %1ff%%",
+			float64(totalReceived)/float64(fileSize)*100)
 	}
+
+	fmt.Println()
+	fmt.Printf("SHA-256: %x\n", hasher.Sum(nil))
+
+	received := totalReceived
 
 	if err := temp.Close(); err != nil {
 		return err
