@@ -1,0 +1,22 @@
+# Go binaries
+*.exe
+*.test
+*.out
+
+# Build output
+bin/
+dist/
+
+# Received files
+download/
+
+# Local test files
+hello.txt
+*.part
+
+# Editor files
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
