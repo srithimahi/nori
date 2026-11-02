@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -14,6 +15,10 @@ import (
 const MaxFileSize int64 = 10 << 30
 const MaxNameLength = 255
 const ChunkSize = 256 * 1024
+const (
+	AckSuccess byte = 1
+	AckFailure byte = 0
+)
 
 func SendFile(conn net.Conn, filePath string) error {
 	fmt.Printf("DEBUG: Opening file %q\n", filePath)
@@ -79,6 +84,7 @@ func SendFile(conn net.Conn, filePath string) error {
 		}
 
 		written := 0
+
 		for written < n {
 			count, err := conn.Write(buffer[written:n])
 			if err != nil {
@@ -99,9 +105,36 @@ func SendFile(conn net.Conn, filePath string) error {
 	}
 
 	fmt.Println()
-	fmt.Printf("SHA-256: %x\n", hasher.Sum(nil))
+
+	digest := hasher.Sum(nil)
+	fmt.Printf("SHA-256: %x\n", digest)
 	fmt.Printf("Sent %d bytes\n", totalSent)
 
+	written := 0
+
+	for written < len(digest) {
+		count, err := conn.Write(digest[written:])
+		if err != nil {
+			return fmt.Errorf("sending digest: %w", err)
+		}
+
+		if count == 0 {
+			return io.ErrShortWrite
+		}
+
+		written += count
+	}
+
+	var ack [1]byte
+	if _, err := io.ReadFull(conn, ack[:]); err != nil {
+		return fmt.Errorf("reading acknowledgement: %w", err)
+	}
+
+	if ack[0] != AckSuccess {
+		return errors.New("receiver rejected the transfer")
+	}
+
+	fmt.Println("Transfer verified and saved by receiver")
 	return nil
 }
 
@@ -188,12 +221,30 @@ func ReceiveFile(conn net.Conn, downloadDir string) error {
 
 		totalReceived += int64(n)
 
-		fmt.Printf("\rReceiving: %1ff%%",
+		fmt.Printf("\rReceiving: %.1f%%",
 			float64(totalReceived)/float64(fileSize)*100)
 	}
 
 	fmt.Println()
-	fmt.Printf("SHA-256: %x\n", hasher.Sum(nil))
+	var expectedDigest [sha256.Size]byte
+
+	if _, err := io.ReadFull(conn, expectedDigest[:]); err != nil {
+		temp.Close()
+		return fmt.Errorf("reading expected digest: %w", err)
+	}
+
+	actualDigest := hasher.Sum(nil)
+
+	fmt.Printf("Expected SHA-256: %x\n", expectedDigest)
+	fmt.Printf("Actual SHA-256:   %x\n", actualDigest)
+
+	if !bytes.Equal(expectedDigest[:], actualDigest) {
+		temp.Close()
+		_, _ = conn.Write([]byte{AckFailure})
+		return errors.New("SHA-256 mismatch: file corrupted")
+	}
+
+	fmt.Println("SHA-256 verified")
 
 	received := totalReceived
 
@@ -223,8 +274,13 @@ func ReceiveFile(conn net.Conn, downloadDir string) error {
 		return err
 	}
 
-	fmt.Printf("Received %d bytes \n", received)
+	fmt.Printf("Received %d bytes\n", received)
 	fmt.Println("Saved to:", destination)
 
+	if _, err := conn.Write([]byte{AckSuccess}); err != nil {
+		return fmt.Errorf("sending acknowledgment: %w", err)
+	}
+
+	fmt.Println("Acknowledgment sent")
 	return nil
 }
